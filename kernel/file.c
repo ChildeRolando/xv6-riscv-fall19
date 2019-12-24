@@ -13,31 +13,39 @@
 #include "stat.h"
 #include "proc.h"
 
+#define INIT_SIZE 64
+#define FILE2NODE(fp) (file_node*)((void*)(fp) - (void*)&(((file_node*)0)->file))
+
+typedef struct _fn {
+  struct file file;
+  struct list list_node;
+} file_node;
+
 struct devsw devsw[NDEV];
 struct {
   struct spinlock lock;
-  struct file file[NFILE];
+  struct list list_head;
 } ftable;
 
 void
 fileinit(void)
 {
   initlock(&ftable.lock, "ftable");
+  lst_init(&(ftable.list_head));
 }
 
 // Allocate a file structure.
 struct file*
 filealloc(void)
 {
-  struct file *f;
-
   acquire(&ftable.lock);
-  for(f = ftable.file; f < ftable.file + NFILE; f++){
-    if(f->ref == 0){
-      f->ref = 1;
-      release(&ftable.lock);
-      return f;
-    }
+  file_node *fnode;
+  if( (fnode = bd_malloc(sizeof(file_node))) != 0 ){
+    struct file *fp = &(fnode->file);
+    fp->ref = 1;
+    lst_push(&(ftable.list_head), &(fnode->list_node));
+    release(&ftable.lock);
+    return fp;
   }
   release(&ftable.lock);
   return 0;
@@ -59,8 +67,6 @@ filedup(struct file *f)
 void
 fileclose(struct file *f)
 {
-  struct file ff;
-
   acquire(&ftable.lock);
   if(f->ref < 1)
     panic("fileclose");
@@ -68,18 +74,18 @@ fileclose(struct file *f)
     release(&ftable.lock);
     return;
   }
-  ff = *f;
-  f->ref = 0;
-  f->type = FD_NONE;
+  file_node* fnode= FILE2NODE(f);
+  lst_remove(&(fnode->list_node));
   release(&ftable.lock);
 
-  if(ff.type == FD_PIPE){
-    pipeclose(ff.pipe, ff.writable);
-  } else if(ff.type == FD_INODE || ff.type == FD_DEVICE){
-    begin_op(ff.ip->dev);
-    iput(ff.ip);
-    end_op(ff.ip->dev);
+  if(f->type == FD_PIPE){
+    pipeclose(f->pipe, f->writable);
+  } else if(f->type == FD_INODE || f->type == FD_DEVICE){
+    begin_op(f->ip->dev);
+    iput(f->ip);
+    end_op(f->ip->dev);
   }
+  bd_free(fnode);
 }
 
 // Get metadata about file f.
